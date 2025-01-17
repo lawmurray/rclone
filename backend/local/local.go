@@ -1742,7 +1742,7 @@ func (f *Fs) ChangeNotify(ctx context.Context, notifyFunc func(string, fs.EntryT
 		// At time of writing, all backends use a polling implementation of
 		// ChangeNotify. While it is unnecessary to use polling for the local
 		// backend, it is assumed by some tests and possibly some client
-		// applications, so it is immitated by collecting changed entries until
+		// applications, so it is imitated by collecting changed entries until
 		// the polling interval, and only then calling notifyFunc() on each.
 		//
 		// While a polling implementation is unnecessary, it does have the
@@ -1818,7 +1818,7 @@ func (f *Fs) ChangeNotify(ctx context.Context, notifyFunc func(string, fs.EntryT
 								//       notifyFunc(), including a/b from step 3, for the
 								//       second time.
 								//
-								//    The polling immitation helps to mitigate this, as only
+								//    The polling imitation helps to mitigate this, as only
 								//    one event is emitted per file in the same polling
 								//    interval.
 								//
