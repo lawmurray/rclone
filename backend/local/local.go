@@ -18,6 +18,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/fsnotify/fsnotify"
+	"github.com/moby/sys/mountinfo"
 	"github.com/rclone/rclone/fs"
 	"github.com/rclone/rclone/fs/accounting"
 	"github.com/rclone/rclone/fs/config"
@@ -1697,7 +1698,16 @@ func (d *Directory) Hash() {
 //
 // Close the returned channel to stop being notified.
 func (f *Fs) ChangeNotify(ctx context.Context, notifyFunc func(string, fs.EntryType), pollIntervalChan <-chan time.Duration) {
-	// TODO: Error if filepath is on NFS, or contains NFS mountpoints
+	// Will not work with an NFS mounted filesystem, error in this case
+	infos, err := mountinfo.GetMounts(mountinfo.ParentsFilter(f.root))
+	if err == nil {
+		for i := 0; i < len(infos); i++ {
+			if infos[i].FSType == "nfs" {
+				fs.Error(f, "ChangeNotify does not support NFS mounts")
+				return
+			}
+		}
+	}
 
 	// Create new watcher
 	watcher, err := fsnotify.NewWatcher()
@@ -1729,26 +1739,50 @@ func (f *Fs) ChangeNotify(ctx context.Context, notifyFunc func(string, fs.EntryT
 	}
 
 	go func() {
-		// Close watcher when done
-		defer func() {
-			err := watcher.Close()
-			if err != nil {
-				fs.Errorf(f, "Failed to close watcher: %s", err)
-			}
-		}()
+		// At time of writing, all backends use a polling implementation of
+		// ChangeNotify. While it is unnecessary to use polling for the local
+		// backend, it is assumed by some tests and possibly some client
+		// applications, so it is immitated by collecting changed entries until
+		// the polling interval, and only then calling notifyFunc() on each.
+		//
+		// While a polling implementation is unnecessary, it does have the
+		// advantage of reducing the number of calls to notifyFunc(), which is
+		// called only once for each entry per polling interval, even if that
+		// entry experienced multiple events in the polling interval.
+		var ticker *time.Ticker
+		var tickerC <-chan time.Time
+		changed := make(map[string]fs.EntryType)
 
 		// Process poll interval updates, events and errors
 		rootSlash := strings.TrimSuffix(f.root, "/") + "/"
+	loop:
 		for {
 			select {
-			case _, ok := <-pollIntervalChan:
+			case pollInterval, ok := <-pollIntervalChan:
+				// Update ticker
 				if !ok {
-					return
+					if ticker != nil {
+						ticker.Stop()
+					}
+					break loop
 				}
-
+				if ticker != nil {
+					ticker.Stop()
+					ticker, tickerC = nil, nil
+				}
+				if pollInterval != 0 {
+					ticker = time.NewTicker(pollInterval)
+					tickerC = ticker.C
+				}
+			case <-tickerC:
+				// Call notifyfunc() for all collected paths
+				for entryPath, entryType := range changed {
+					notifyFunc(entryPath, entryType)
+				}
+				changed = make(map[string]fs.EntryType)
 			case event, ok := <-watcher.Events:
 				if !ok {
-					return
+					break loop
 				}
 				if event.Has(fsnotify.Create) {
 					fs.Debugf(f, "Create: %s", event.Name)
@@ -1784,6 +1818,10 @@ func (f *Fs) ChangeNotify(ctx context.Context, notifyFunc func(string, fs.EntryT
 								//       notifyFunc(), including a/b from step 3, for the
 								//       second time.
 								//
+								//    The polling immitation helps to mitigate this, as only
+								//    one event is emitted per file in the same polling
+								//    interval.
+								//
 								// 2. If a file is removed before WalkDir() reaches its parent
 								//    directory, it is never passed to notifyFunc().
 								err := watcher.Add(path)
@@ -1795,7 +1833,7 @@ func (f *Fs) ChangeNotify(ctx context.Context, notifyFunc func(string, fs.EntryT
 								dirs[path] = struct{}{}
 								entryType = fs.EntryDirectory
 							}
-							notifyFunc(entryPath, entryType)
+							changed[entryPath] = entryType
 						}
 						return nil
 					})
@@ -1849,15 +1887,21 @@ func (f *Fs) ChangeNotify(ctx context.Context, notifyFunc func(string, fs.EntryT
 							dirs[event.Name] = struct{}{}
 						}
 					}
-					notifyFunc(entryPath, entryType)
+					changed[entryPath] = entryType
 				}
 
 			case err, ok := <-watcher.Errors:
 				if !ok {
-					return
+					break loop
 				}
 				fs.Errorf(f, "Error: %s", err.Error())
 			}
+		}
+
+		// Close watcher
+		err := watcher.Close()
+		if err != nil {
+			fs.Errorf(f, "Failed to close watcher: %s", err)
 		}
 	}()
 }
