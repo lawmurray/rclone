@@ -1697,7 +1697,7 @@ func (d *Directory) Hash() {
 //
 // Close the returned channel to stop being notified.
 func (f *Fs) ChangeNotify(ctx context.Context, notifyFunc func(string, fs.EntryType), pollIntervalChan <-chan time.Duration) {
-	// TODO: Return nil if filepath is on NFS, or contains NFS mountpoints
+	// TODO: Error if filepath is on NFS, or contains NFS mountpoints
 
 	// Create new watcher
 	watcher, err := fsnotify.NewWatcher()
