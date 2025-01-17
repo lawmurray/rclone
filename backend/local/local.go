@@ -1706,6 +1706,10 @@ func (f *Fs) ChangeNotify(ctx context.Context, notifyFunc func(string, fs.EntryT
 		return
 	}
 
+	// Track directories so as to call notifyFunc() with correct entry type on
+	// remove and rename events; see below for further commentary
+	dirs := make(map[string]struct{})
+
 	// Recursively watch all subdirectories
 	err = filepath.WalkDir(f.root, func(path string, d os.DirEntry, err error) error {
 		if d != nil && d.IsDir() {
@@ -1715,6 +1719,7 @@ func (f *Fs) ChangeNotify(ctx context.Context, notifyFunc func(string, fs.EntryT
 			} else {
 				fs.Debugf(f, "Started watching %s\n", path)
 			}
+			dirs[path] = struct{}{}
 		}
 		return nil
 	})
@@ -1783,10 +1788,11 @@ func (f *Fs) ChangeNotify(ctx context.Context, notifyFunc func(string, fs.EntryT
 								//    directory, it is never passed to notifyFunc().
 								err := watcher.Add(path)
 								if err != nil {
-									fs.Debugf(f, "Failed to start watching %s", path)
+									fs.Errorf(f, "Failed to start watching %s: %s\n", path, err)
 								} else {
-									fs.Debugf(f, "Started watching %s", path)
+									fs.Debugf(f, "Started watching %s\n", path)
 								}
+								dirs[path] = struct{}{}
 								entryType = fs.EntryDirectory
 							}
 							notifyFunc(entryPath, entryType)
@@ -1816,16 +1822,31 @@ func (f *Fs) ChangeNotify(ctx context.Context, notifyFunc func(string, fs.EntryT
 					// Relative path
 					entryPath := strings.TrimPrefix(event.Name, rootSlash)
 
-					// Type of entry (object or directory). Because fsnotify provides no
-					// information on whether the path is a directory, Stat() is used to
-					// determine this, but this requires that the path still exists. For
-					// Remove and Rename events where the path no longer exists,
-					// EntryObject is always used
+					// Type of entry (object or directory)
 					entryType := fs.EntryObject
-					if event.Has(fsnotify.Write) || event.Has(fsnotify.Chmod) {
-						info, err := os.Stat(event.Name)
-						if err == nil && info != nil && info.IsDir() {
+					if event.Has(fsnotify.Remove) || event.Has(fsnotify.Rename) {
+						// Fsnotify provides no information on the type of entries, and
+						// for a remove or rename event the entry no longer exists, so
+						// cannot use Stat(). Instead, the dirs variable is used to track
+						// what is and is not a directory
+						if _, ok := dirs[event.Name]; ok {
 							entryType = fs.EntryDirectory
+							delete(dirs, event.Name)
+						}
+					} else if event.Has(fsnotify.Write) || event.Has(fsnotify.Chmod) {
+						// Use Stat() to determine if the event is for a directory
+						info, err := os.Stat(event.Name)
+						if err != nil || info == nil {
+							// The file/directory has been deleted in the meantime, revert
+							// to using dirs as above, but don't remove it from dirs yet, as
+							// there should be another rename or remove event coming that
+							// can handle that
+							if _, ok := dirs[event.Name]; ok {
+								entryType = fs.EntryDirectory
+							}
+						} else if info.IsDir() {
+							entryType = fs.EntryDirectory
+							dirs[event.Name] = struct{}{}
 						}
 					}
 					notifyFunc(entryPath, entryType)
