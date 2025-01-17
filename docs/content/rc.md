@@ -2068,7 +2068,7 @@ the `--vfs-cache-mode` is off, it will return an empty result.
        ],
     }
 
-The `expiry` time is the time until the file is elegible for being
+The `expiry` time is the time until the file is eligible for being
 uploaded in floating point seconds. This may go negative. As rclone
 only transfers `--transfers` files at once, only the lowest
 `--transfers` expiry times will have `uploading` as `true`. So there
@@ -2104,6 +2104,7 @@ This takes the following parameters
 - `fs` - select the VFS in use (optional)
 - `id` - a numeric ID as returned from `vfs/queue`
 - `expiry` - a new expiry time as floating point seconds
+- `relative` - if set, expiry is to be treated as relative to the current expiry (optional, boolean)
 
 This returns an empty result on success, or an error.
 

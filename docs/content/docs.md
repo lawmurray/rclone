@@ -36,6 +36,7 @@ See the following for detailed instructions for
   * [Chunker](/chunker/) - transparently splits large files for other remotes
   * [Citrix ShareFile](/sharefile/)
   * [Compress](/compress/)
+  * [Cloudinary](/cloudinary/)
   * [Combine](/combine/)
   * [Crypt](/crypt/) - to encrypt other remotes
   * [DigitalOcean Spaces](/s3/#digitalocean-spaces)
@@ -2929,7 +2930,7 @@ so they take exactly the same form.
 The options set by environment variables can be seen with the `-vv` flag, e.g. `rclone version -vv`.
 
 Options that can appear multiple times (type `stringArray`) are
-treated slighly differently as environment variables can only be
+treated slightly differently as environment variables can only be
 defined once. In order to allow a simple mechanism for adding one or
 many items, the input is treated as a [CSV encoded](https://godoc.org/encoding/csv)
 string. For example
