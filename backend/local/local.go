@@ -1856,11 +1856,6 @@ func (f *Fs) ChangeNotify(ctx context.Context, notifyFunc func(string, fs.EntryT
 							entryType = fs.EntryDirectory
 							delete(dirs, event.Name)
 						}
-
-						// The watch should be automatically removed, except on a rename
-						// event on Windows; make sure that it's removed for consistent
-						// behavior
-						watcher.Remove(event.Name)
 					} else if event.Has(fsnotify.Write) || event.Has(fsnotify.Chmod) {
 						// Use Stat() to determine if the event is for a directory
 						info, err := os.Stat(event.Name)
@@ -1911,7 +1906,6 @@ func (f *Fs) ChangeNotify(ctx context.Context, notifyFunc func(string, fs.EntryT
 	})
 	if err != nil {
 		fs.Errorf(f, "Failed to start watching %s: %s", f.root, err)
-		return
 	}
 }
 
