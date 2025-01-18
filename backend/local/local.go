@@ -1720,24 +1720,9 @@ func (f *Fs) ChangeNotify(ctx context.Context, notifyFunc func(string, fs.EntryT
 	// remove and rename events; see below for further commentary
 	dirs := make(map[string]struct{})
 
-	// Recursively watch all subdirectories
-	err = filepath.WalkDir(f.root, func(path string, d os.DirEntry, err error) error {
-		if d != nil && d.IsDir() {
-			err := watcher.Add(path)
-			if err != nil {
-				fs.Errorf(f, "Failed to start watching %s: %s\n", path, err)
-			} else {
-				fs.Debugf(f, "Started watching %s\n", path)
-			}
-			dirs[path] = struct{}{}
-		}
-		return nil
-	})
-	if err != nil {
-		fs.Errorf(f, "Failed to start watching %s: %s", f.root, err)
-		return
-	}
-
+	// Start consuming events from the watcher before adding any paths to it,
+	// or the events channel may fill and cause watcher.Add() to hang (observed
+	// on Windows)
 	go func() {
 		// At time of writing, all backends use a polling implementation of
 		// ChangeNotify. While it is unnecessary to use polling for the local
@@ -1871,6 +1856,11 @@ func (f *Fs) ChangeNotify(ctx context.Context, notifyFunc func(string, fs.EntryT
 							entryType = fs.EntryDirectory
 							delete(dirs, event.Name)
 						}
+
+						// The watch should be automatically removed, except on a rename
+						// event on Windows; make sure that it's removed for consistent
+						// behavior
+						watcher.Remove(event.Name)
 					} else if event.Has(fsnotify.Write) || event.Has(fsnotify.Chmod) {
 						// Use Stat() to determine if the event is for a directory
 						info, err := os.Stat(event.Name)
@@ -1896,6 +1886,25 @@ func (f *Fs) ChangeNotify(ctx context.Context, notifyFunc func(string, fs.EntryT
 				}
 				fs.Errorf(f, "Error: %s", err.Error())
 			}
+		}
+
+		// Recursively watch all subdirectories from the root
+		err = filepath.WalkDir(f.root, func(path string, d os.DirEntry, err error) error {
+			if d != nil && d.IsDir() {
+				err := watcher.Add(path)
+				if err != nil {
+					fs.Errorf(f, "Failed to start watching %s: %s\n", path, err)
+					return err
+				} else {
+					fs.Debugf(f, "Started watching %s\n", path)
+				}
+				dirs[path] = struct{}{}
+			}
+			return nil
+		})
+		if err != nil {
+			fs.Errorf(f, "Failed to start watching %s: %s", f.root, err)
+			return
 		}
 
 		// Close watcher
