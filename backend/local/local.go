@@ -1888,31 +1888,31 @@ func (f *Fs) ChangeNotify(ctx context.Context, notifyFunc func(string, fs.EntryT
 			}
 		}
 
-		// Recursively watch all subdirectories from the root
-		err = filepath.WalkDir(f.root, func(path string, d os.DirEntry, err error) error {
-			if d != nil && d.IsDir() {
-				err := watcher.Add(path)
-				if err != nil {
-					fs.Errorf(f, "Failed to start watching %s: %s\n", path, err)
-					return err
-				} else {
-					fs.Debugf(f, "Started watching %s\n", path)
-				}
-				dirs[path] = struct{}{}
-			}
-			return nil
-		})
-		if err != nil {
-			fs.Errorf(f, "Failed to start watching %s: %s", f.root, err)
-			return
-		}
-
 		// Close watcher
 		err := watcher.Close()
 		if err != nil {
 			fs.Errorf(f, "Failed to close watcher: %s", err)
 		}
 	}()
+
+	// Recursively watch all subdirectories from the root
+	err = filepath.WalkDir(f.root, func(path string, d os.DirEntry, err error) error {
+		if d != nil && d.IsDir() {
+			err := watcher.Add(path)
+			if err != nil {
+				fs.Errorf(f, "Failed to start watching %s: %s\n", path, err)
+				return err
+			} else {
+				fs.Debugf(f, "Started watching %s\n", path)
+			}
+			dirs[path] = struct{}{}
+		}
+		return nil
+	})
+	if err != nil {
+		fs.Errorf(f, "Failed to start watching %s: %s", f.root, err)
+		return
+	}
 }
 
 // Check the interfaces are satisfied
