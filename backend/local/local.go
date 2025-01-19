@@ -1715,11 +1715,13 @@ func (f *Fs) ChangeNotify(ctx context.Context, notifyFunc func(string, fs.EntryT
 	}
 
 	// Known directories, used to call notifyFunc() with correct entry type on
-	// remove and rename events; see below for further commentary
-	dirs := make(map[string]struct{})
+	// remove and rename events; see below for further commentary. Two
+	// goroutines may access this concurrently.
+	dirs := new(sync.Map)
 
-	// Files and directories that have changed in the last poll window
-	changed := make(map[string]fs.EntryType)
+	// Files and directories that have changed in the last poll window. Two
+	// goroutines may access this concurrently.
+	changed := new(sync.Map)
 
 	// Channel with paths to be watched. Buffered to not block the event
 	// goroutine, which can cause deadlock (only observed on Windows, may
@@ -1769,10 +1771,13 @@ func (f *Fs) ChangeNotify(ctx context.Context, notifyFunc func(string, fs.EntryT
 				}
 			case <-tickerC:
 				// Call notifyfunc() for all collected paths
-				for entryPath, entryType := range changed {
+				changed.Range(func(key any, value any) bool {
+					entryPath := key.(string)
+					entryType := value.(fs.EntryType)
 					notifyFunc(filepath.ToSlash(entryPath), entryType)
-				}
-				changed = make(map[string]fs.EntryType)
+					changed.Delete(entryPath)
+					return true
+				})
 			case event, ok := <-watcher.Events:
 				if !ok {
 					break loop
@@ -1811,9 +1816,9 @@ func (f *Fs) ChangeNotify(ctx context.Context, notifyFunc func(string, fs.EntryT
 						// for a remove or rename event the entry no longer exists, so
 						// cannot use Stat(). Instead, the dirs variable is used to track
 						// what is and is not a directory
-						if _, ok := dirs[event.Name]; ok {
+
+						if _, ok := dirs.LoadAndDelete(event.Name); ok {
 							entryType = fs.EntryDirectory
-							delete(dirs, event.Name)
 						}
 					} else if event.Has(fsnotify.Write) || event.Has(fsnotify.Chmod) {
 						// Use Stat() to determine if the event is for a directory
@@ -1822,16 +1827,16 @@ func (f *Fs) ChangeNotify(ctx context.Context, notifyFunc func(string, fs.EntryT
 							// The file/directory has been deleted in the meantime, revert
 							// to using dirs as above, but don't remove it from dirs yet, as
 							// there should be another rename or remove event coming that
-							// can handle that
-							if _, ok := dirs[event.Name]; ok {
+							// can handle that.
+							if _, ok := dirs.Load(event.Name); ok {
 								entryType = fs.EntryDirectory
 							}
 						} else if info.IsDir() {
 							entryType = fs.EntryDirectory
-							dirs[event.Name] = struct{}{}
+							dirs.Store(event.Name, struct{}{})
 						}
 					}
-					changed[entryPath] = entryType
+					changed.Store(entryPath, entryType)
 				}
 
 			case err, ok := <-watcher.Errors:
@@ -1909,11 +1914,11 @@ func (f *Fs) ChangeNotify(ctx context.Context, notifyFunc func(string, fs.EntryT
 						} else {
 							fs.Debugf(f, "Started watching %s\n", path)
 						}
-						dirs[path] = struct{}{}
+						dirs.Store(path, struct{}{})
 						entryType = fs.EntryDirectory
 					}
 					if !first {
-						changed[entryPath] = entryType
+						changed.Store(entryPath, entryType)
 					}
 				}
 				return nil
