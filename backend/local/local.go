@@ -1693,8 +1693,6 @@ func (d *Directory) Hash() {
 }
 
 // ChangeNotify calls the passed function with a path that has had changes.
-// The implementation does not use polling, such that the given poll interval
-// is ignored.
 //
 // Close the returned channel to stop being notified.
 func (f *Fs) ChangeNotify(ctx context.Context, notifyFunc func(string, fs.EntryType), pollIntervalChan <-chan time.Duration) {
@@ -1716,9 +1714,22 @@ func (f *Fs) ChangeNotify(ctx context.Context, notifyFunc func(string, fs.EntryT
 		return
 	}
 
-	// Track directories so as to call notifyFunc() with correct entry type on
+	// Known directories, used to call notifyFunc() with correct entry type on
 	// remove and rename events; see below for further commentary
 	dirs := make(map[string]struct{})
+
+	// Files and directories that have changed in the last poll window
+	changed := make(map[string]fs.EntryType)
+
+	// Channel with paths to be watched. Buffered to not block the event
+	// goroutine, which can cause deadlock (only observed on Windows, may
+	// relate to fsnotify Windows backend). A small buffer seems sufficient
+	// for tests, but it may as well be generous.
+	watchChan := make(chan string, 1024)
+
+	// Channel to indicate when initial watchers are established on root
+	// directory. Buffered to not unnecessarily block the watcher goroutine.
+	initChan := make(chan bool, 1)
 
 	// Start consuming events from the watcher before adding any paths to it,
 	// or the events channel may fill and cause watcher.Add() to hang (observed
@@ -1736,10 +1747,7 @@ func (f *Fs) ChangeNotify(ctx context.Context, notifyFunc func(string, fs.EntryT
 		// entry experienced multiple events in the polling interval.
 		var ticker *time.Ticker
 		var tickerC <-chan time.Time
-		changed := make(map[string]fs.EntryType)
 
-		// Process poll interval updates, events and errors
-		rootSlash := strings.TrimSuffix(f.root, "/") + "/"
 	loop:
 		for {
 			select {
@@ -1762,7 +1770,7 @@ func (f *Fs) ChangeNotify(ctx context.Context, notifyFunc func(string, fs.EntryT
 			case <-tickerC:
 				// Call notifyfunc() for all collected paths
 				for entryPath, entryType := range changed {
-					notifyFunc(entryPath, entryType)
+					notifyFunc(filepath.ToSlash(entryPath), entryType)
 				}
 				changed = make(map[string]fs.EntryType)
 			case event, ok := <-watcher.Events:
@@ -1772,59 +1780,10 @@ func (f *Fs) ChangeNotify(ctx context.Context, notifyFunc func(string, fs.EntryT
 				if event.Has(fsnotify.Create) {
 					fs.Debugf(f, "Create: %s", event.Name)
 
-					// File or directory creation event. For a directory, recursively
-					// watch all subdirectories, as a creation event is triggered not
-					// just on a simple mkdir, but also when an existing directory is
-					// moved in.
-					err := filepath.WalkDir(event.Name, func(path string, d os.DirEntry, err error) error {
-						if d != nil {
-							entryPath := strings.TrimPrefix(path, rootSlash)
-							entryType := fs.EntryObject
-							if d.IsDir() {
-								// Watch the directory.
-								//
-								// Given the way WalkDir() handles directories (calling the
-								// callback function before listing the directory contents to
-								// continue the recursion), the watch begins before the
-								// directory listing, and events start being received
-								// immediately.
-								//
-								// There are some caveats to this approach:
-								//
-								// 1. notifyFunc() may be called twice for a file that is
-								//    created between the watch starting and the directory
-								//    listing. Consider the following sequence of operations:
-								//
-								//    1. directory a/ created,
-								//    2. directory a/ watched,
-								//    3. file a/b created and passed to notifyFunc(),
-								//    4. directory a/ listing,
-								//    5. recursing, each file in the a/ directory is passed to
-								//       notifyFunc(), including a/b from step 3, for the
-								//       second time.
-								//
-								//    The polling imitation helps to mitigate this, as only
-								//    one event is emitted per file in the same polling
-								//    interval.
-								//
-								// 2. If a file is removed before WalkDir() reaches its parent
-								//    directory, it is never passed to notifyFunc().
-								err := watcher.Add(path)
-								if err != nil {
-									fs.Errorf(f, "Failed to start watching %s: %s\n", path, err)
-								} else {
-									fs.Debugf(f, "Started watching %s\n", path)
-								}
-								dirs[path] = struct{}{}
-								entryType = fs.EntryDirectory
-							}
-							changed[entryPath] = entryType
-						}
-						return nil
-					})
-					if err != nil {
-						fs.Debugf(f, "Failed to start watching %s", event.Name)
-					}
+					// File or directory creation event. In the case of a directory,
+					// it may be an existing directory being moved in, so watchers are
+					// established recursively through it.
+					watchChan <- event.Name
 				} else {
 					// Internally, fsnotify stops watching directories that are removed
 					// or renamed, so it is not necessary to make updates to the watch
@@ -1843,7 +1802,7 @@ func (f *Fs) ChangeNotify(ctx context.Context, notifyFunc func(string, fs.EntryT
 					}
 
 					// Relative path
-					entryPath := strings.TrimPrefix(event.Name, rootSlash)
+					entryPath, _ := filepath.Rel(f.root, event.Name)
 
 					// Type of entry (object or directory)
 					entryType := fs.EntryObject
@@ -1883,6 +1842,9 @@ func (f *Fs) ChangeNotify(ctx context.Context, notifyFunc func(string, fs.EntryT
 			}
 		}
 
+		// Close channels
+		close(watchChan)
+
 		// Close watcher
 		err := watcher.Close()
 		if err != nil {
@@ -1890,22 +1852,88 @@ func (f *Fs) ChangeNotify(ctx context.Context, notifyFunc func(string, fs.EntryT
 		}
 	}()
 
-	// Recursively watch all subdirectories from the root
-	err = filepath.WalkDir(f.root, func(path string, d os.DirEntry, err error) error {
-		if d != nil && d.IsDir() {
-			err := watcher.Add(path)
-			if err != nil {
-				fs.Errorf(f, "Failed to start watching %s: %s\n", path, err)
-				return err
+	// Start goroutine to establish recursive watchers on paths consumed from
+	// watchChan.
+	go func() {
+		first := true // first time is to establish initial watchers on the root
+		for {
+			path, ok := <-watchChan
+			if !ok {
+				break
 			}
-			fs.Debugf(f, "Started watching %s\n", path)
-			dirs[path] = struct{}{}
+			err := filepath.WalkDir(path, func(path string, d os.DirEntry, err error) error {
+				if err != nil {
+					fs.Errorf(f, "Error walking directory %s: %s\n", path, err)
+				}
+				if d == nil {
+					fs.Errorf(f, "No file info for %s\n", path)
+				} else {
+					entryPath, _ := filepath.Rel(f.root, path)
+					entryType := fs.EntryObject
+					if d.IsDir() {
+						// Watch the directory.
+						//
+						// The critical consideration here is to establish the watch on a
+						// directory before listing its contents, ensuring that no files or
+						// directories are missed. WalkDir() calls the provided function
+						// for a directory before listing its contents, so this is fine.
+						//
+						// A file may be created between establishing the watch and listing
+						// the directory. In this case it is observed to change twice.
+						// Consider the following sequence of operations:
+						//
+						//    1. directory a/ created,
+						//    2. directory a/ watched,
+						//    3. file a/b created and change observed,
+						//    4. directory a/ listing,
+						//    5. recursing, a change is observed for each file in the a/
+						//       directory, including a/b from step 3, for the second time.
+						//
+						// The polling imitation mitigates this, as multiple events for
+						// the one path in the one polling interval result in only one
+						// call to notifyFunc(). If polling imitation is not used, however,
+						// this will result in two calls to notifyFunc(). That would still
+						// be preferable to an approach that misses files entirely, hoewver.
+						//
+						// If a file is removed before WalkDir() reaches its directory, it
+						// is never passed to notifyFunc(). It is as though the file were
+						// removed before ChangeNotify() was called. Such race conditions
+						// with exogenous filesystem operations exist anyway. They are
+						// mitigated internally by ChangeNotify() not returning until
+						// the initial watch is established, so that the caller is blocked
+						// until the watch is established. For other threads, this is a
+						// race condition anyway.
+						err := watcher.Add(path)
+						if err != nil {
+							fs.Errorf(f, "Failed to start watching %s: %s\n", path, err)
+						} else {
+							fs.Debugf(f, "Started watching %s\n", path)
+						}
+						dirs[path] = struct{}{}
+						entryType = fs.EntryDirectory
+					}
+					if !first {
+						changed[entryPath] = entryType
+					}
+				}
+				return nil
+			})
+			if err != nil {
+				fs.Errorf(f, "Failed to start watching %s: %s", path, err)
+			}
+			if first {
+				first = false
+				initChan <- true // initialization complete
+			}
 		}
-		return nil
-	})
-	if err != nil {
-		fs.Errorf(f, "Failed to start watching %s: %s", f.root, err)
-	}
+	}()
+
+	// Recursively watch all subdirectories from the root
+	watchChan <- f.root
+
+	// Wait until initial watch is established before returning
+	<-initChan
+	close(initChan)
 }
 
 // Check the interfaces are satisfied
