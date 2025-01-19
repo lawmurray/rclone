@@ -877,19 +877,22 @@ func Run(t *testing.T, opt *Opt) {
 			require.NoError(t, err)
 
 			pollInterval := make(chan time.Duration)
-			dirChanges := new(sync.Map)
-			objChanges := new(sync.Map)
+			dirChanges := map[string]struct{}{}
+			objChanges := map[string]struct{}{}
+			var mutex sync.Mutex
 			doChangeNotify(ctx, func(x string, e fs.EntryType) {
 				fs.Debugf(nil, "doChangeNotify(%q, %+v)", x, e)
 				if strings.HasPrefix(x, file1.Path[:5]) || strings.HasPrefix(x, file2.Path[:5]) {
 					fs.Debugf(nil, "Ignoring notify for file1 or file2: %q, %v", x, e)
 					return
 				}
+				mutex.Lock()
 				if e == fs.EntryDirectory {
-					dirChanges.Store(x, struct{}{})
+					dirChanges[x] = struct{}{}
 				} else if e == fs.EntryObject {
-					objChanges.Store(x, struct{}{})
+					objChanges[x] = struct{}{}
 				}
+				mutex.Unlock()
 			}, pollInterval)
 			defer func() { close(pollInterval) }()
 			pollInterval <- time.Second
@@ -914,9 +917,9 @@ func Run(t *testing.T, opt *Opt) {
 
 			// Looks for each item in wants in changes -
 			// if they are all found it returns true
-			contains := func(changes *sync.Map, wants []string) bool {
+			contains := func(changes map[string]struct{}, wants []string) bool {
 				for _, want := range wants {
-					_, ok := changes.Load(want)
+					_, ok := changes[want]
 					if !ok {
 						return false
 					}
