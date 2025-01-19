@@ -932,7 +932,9 @@ func Run(t *testing.T, opt *Opt) {
 			wantObjChanges := []string{"dir/file2", "dir/file4", "dir/file3"}
 			ok := false
 			for tries := 1; tries < 10; tries++ {
+				mutex.Lock()
 				ok = contains(dirChanges, wantDirChanges) && contains(objChanges, wantObjChanges)
+				mutex.Unlock()
 				if ok {
 					break
 				}
