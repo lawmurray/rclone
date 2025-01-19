@@ -1787,9 +1787,14 @@ func (f *Fs) ChangeNotify(ctx context.Context, notifyFunc func(string, fs.EntryT
 
 					// File or directory creation event. In the case of a directory,
 					// it may be an existing directory being moved in, so watchers are
-					// established recursively through it.
+					// established recursively through it. The watch goroutine handles
+					// updating `changed` in this case, so that only one Stat() call is
+					// used.
 					watchChan <- event.Name
 				} else {
+					entryPath, _ := filepath.Rel(f.root, event.Name)
+					entryType := fs.EntryObject
+
 					// Internally, fsnotify stops watching directories that are removed
 					// or renamed, so it is not necessary to make updates to the watch
 					// list
@@ -1806,39 +1811,20 @@ func (f *Fs) ChangeNotify(ctx context.Context, notifyFunc func(string, fs.EntryT
 						fs.Debugf(f, "Chmod: %s", event.Name)
 					}
 
-					// Relative path
-					entryPath, _ := filepath.Rel(f.root, event.Name)
-
-					// Type of entry (object or directory)
-					entryType := fs.EntryObject
+					// Type of entry (object or directory); dirs is used to track this
+					// rather than call to Stat(), which can be expensive, and cannot be
+					// used on remove and rename events
 					if event.Has(fsnotify.Remove) || event.Has(fsnotify.Rename) {
-						// Fsnotify provides no information on the type of entries, and
-						// for a remove or rename event the entry no longer exists, so
-						// cannot use Stat(). Instead, the dirs variable is used to track
-						// what is and is not a directory
-
 						if _, ok := dirs.LoadAndDelete(event.Name); ok {
 							entryType = fs.EntryDirectory
 						}
 					} else if event.Has(fsnotify.Write) || event.Has(fsnotify.Chmod) {
-						// Use Stat() to determine if the event is for a directory
-						info, err := os.Stat(event.Name)
-						if err != nil || info == nil {
-							// The file/directory has been deleted in the meantime, revert
-							// to using dirs as above, but don't remove it from dirs yet, as
-							// there should be another rename or remove event coming that
-							// can handle that.
-							if _, ok := dirs.Load(event.Name); ok {
-								entryType = fs.EntryDirectory
-							}
-						} else if info.IsDir() {
+						if _, ok := dirs.Load(event.Name); ok {
 							entryType = fs.EntryDirectory
-							dirs.Store(event.Name, struct{}{})
 						}
 					}
 					changed.Store(entryPath, entryType)
 				}
-
 			case err, ok := <-watcher.Errors:
 				if !ok {
 					break loop
@@ -1866,6 +1852,7 @@ func (f *Fs) ChangeNotify(ctx context.Context, notifyFunc func(string, fs.EntryT
 			if !ok {
 				break
 			}
+			top := true // true for path, false for everything below it
 			err := filepath.WalkDir(path, func(path string, d os.DirEntry, err error) error {
 				if err != nil {
 					fs.Errorf(f, "Error walking directory %s: %s\n", path, err)
@@ -1917,9 +1904,10 @@ func (f *Fs) ChangeNotify(ctx context.Context, notifyFunc func(string, fs.EntryT
 						dirs.Store(path, struct{}{})
 						entryType = fs.EntryDirectory
 					}
-					if !first {
+					if top && !first {
 						changed.Store(entryPath, entryType)
 					}
+					top = false
 				}
 				return nil
 			})
