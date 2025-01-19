@@ -1852,7 +1852,6 @@ func (f *Fs) ChangeNotify(ctx context.Context, notifyFunc func(string, fs.EntryT
 			if !ok {
 				break
 			}
-			top := true // true for path, false for everything below it
 			err := filepath.WalkDir(path, func(path string, d os.DirEntry, err error) error {
 				if err != nil {
 					fs.Errorf(f, "Error walking directory %s: %s\n", path, err)
@@ -1904,10 +1903,9 @@ func (f *Fs) ChangeNotify(ctx context.Context, notifyFunc func(string, fs.EntryT
 						dirs.Store(path, struct{}{})
 						entryType = fs.EntryDirectory
 					}
-					if top && !first {
+					if !first {
 						changed.Store(entryPath, entryType)
 					}
-					top = false
 				}
 				return nil
 			})
