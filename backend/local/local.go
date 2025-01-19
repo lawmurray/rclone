@@ -1818,6 +1818,10 @@ func (f *Fs) ChangeNotify(ctx context.Context, notifyFunc func(string, fs.EntryT
 						if _, ok := dirs.LoadAndDelete(event.Name); ok {
 							entryType = fs.EntryDirectory
 						}
+						if event.Has(fsnotify.Rename) {
+							// on Windows, need to remove watcher
+							watcher.Remove(event.Name)
+						}
 					} else if event.Has(fsnotify.Write) || event.Has(fsnotify.Chmod) {
 						if _, ok := dirs.Load(event.Name); ok {
 							entryType = fs.EntryDirectory
