@@ -50,12 +50,13 @@ func (f *Fs) ChangeNotify(ctx context.Context, notifyFunc func(string, fs.EntryT
 
 	// Start goroutine to handle filesystem events
 	go func() {
-		// A polling implementation is used. While somewhat unnecessary, as
-		// notifyFunc() could be called immediately on each filesystem event, it
-		// turns out to have some advantages in accurately keeping track of the
-		// entry type (i.e. file or directory) for each file, and allows the
-		// interpretation of change events as a diff since the last set of
-		// change events were sent.
+		// Polling is imitated by accumulating events between ticks. While
+		// notifyFunc() could be called immediately on each filesystem event,
+		// accumulating turns out to have some advantages in accurately keeping
+		// track of entry types (i.e. file or directory), under the
+		// interpretation that the notifications sent at each tick are a diff of
+		// the state of the filesystem at that tick compared to the previous. It
+		// is also assumed by some tests.
 		var ticker *time.Ticker
 		var tickerC <-chan time.Time
 
@@ -164,10 +165,10 @@ func (f *Fs) ChangeNotify(ctx context.Context, notifyFunc func(string, fs.EntryT
 			// watch all subdirectories.
 			err := filepath.WalkDir(path, func(path string, d os.DirEntry, err error) error {
 				if err != nil || d == nil {
-					// The file or directory has already been removed, and we do not
-					// know what type it was. It can be ignored, as this means it has
-					// been both created and removed between ticks, which does not
-					// change the diff.
+					// The entry has already been removed, and we do not know what type
+					// it was. It can be ignored, as this means it has been both created
+					// and removed since the last tick, which will not change the diff
+					// at the next tick.
 					fs.Errorf(f, "Failed to walk %s, already removed? %s", path, err)
 					return nil
 				}
@@ -177,21 +178,24 @@ func (f *Fs) ChangeNotify(ctx context.Context, notifyFunc func(string, fs.EntryT
 				if d.IsDir() {
 					entryType = fs.EntryDirectory
 
-					// Establishing a watch on the directory before listing its contents
-					// ensures that no files or directories are missed and all changes
-					// are notified, even those created or modified while the watch is
-					// being established.
+					// Watch the directory.
 					//
-					// A file or directory may be created between establishing the watch
-					// and listing the directory. In this case it is marked as changed
-					// both by this walk and the subsequent handling of its associated
-					// filesystem event. Because changes are accumulated up to the next
-					// tick, however, only a single notification is ever sent for it.
+					// Establishing a watch on a directory before listing its
+					// contents ensures that no entries are missed and all
+					// changes are notified, even for entries created or
+					// modified while the watch is being established.
 					//
-					// If a file or directory exists when the walk begins, but is
-					// removed before the walk reaches it, it is as though the file
-					// never existed. Again, it occurs between two ticks, and does not
-					// affect the diff.
+					// An entry may be created between establishing the watch on
+					// the directory and listing the directory. In this case it
+					// is marked as changed both by this walk and the subsequent
+					// handling of the associated filesystem event. Because
+					// changes are accumulated up to the next tick, however,
+					// only a single notification is sent at the next tick.
+					//
+					// If an entry exists when the walk begins, but is removed
+					// before the walk reaches it, it is as though that entry
+					// never existed. But as both occur since the last tick,
+					// this does not affect the diff at the next tick.
 					err := watcher.Add(path)
 					if err != nil {
 						fs.Errorf(f, "Failed to start watching %s, already removed? %s", path, err)
