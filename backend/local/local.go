@@ -1717,11 +1717,11 @@ func (f *Fs) ChangeNotify(ctx context.Context, notifyFunc func(string, fs.EntryT
 	// Known directories, used to call notifyFunc() with correct entry type on
 	// remove and rename events; see below for further commentary. Two
 	// goroutines may access this concurrently.
-	dirs := new(sync.Map)
+	dirs := make(map[string]struct{})
 
 	// Files and directories that have changed in the last poll window. Two
 	// goroutines may access this concurrently.
-	changed := new(sync.Map)
+	changed := make(map[string]fs.EntryType)
 
 	// Channel with paths to be watched. Buffered to not block the event
 	// goroutine, which can cause deadlock (only observed on Windows, may
@@ -1771,13 +1771,10 @@ func (f *Fs) ChangeNotify(ctx context.Context, notifyFunc func(string, fs.EntryT
 				}
 			case <-tickerC:
 				// Call notifyfunc() for all collected paths
-				changed.Range(func(key any, value any) bool {
-					entryPath := key.(string)
-					entryType := value.(fs.EntryType)
+				for entryPath, entryType := range changed {
 					notifyFunc(filepath.ToSlash(entryPath), entryType)
-					changed.Delete(entryPath)
-					return true
-				})
+				}
+				changed = make(map[string]fs.EntryType)
 			case event, ok := <-watcher.Events:
 				if !ok {
 					break loop
@@ -1818,16 +1815,13 @@ func (f *Fs) ChangeNotify(ctx context.Context, notifyFunc func(string, fs.EntryT
 					// Type of entry (object or directory); dirs is used to track this
 					// rather than call to Stat(), which can be expensive, and cannot be
 					// used on remove and rename events
-					if event.Has(fsnotify.Remove) || event.Has(fsnotify.Rename) {
-						if _, ok := dirs.LoadAndDelete(event.Name); ok {
-							entryType = fs.EntryDirectory
-						}
-					} else if event.Has(fsnotify.Write) || event.Has(fsnotify.Chmod) {
-						if _, ok := dirs.Load(event.Name); ok {
-							entryType = fs.EntryDirectory
+					if _, ok := dirs[event.Name]; ok {
+						entryType = fs.EntryDirectory
+						if event.Has(fsnotify.Remove) || event.Has(fsnotify.Rename) {
+							delete(dirs, event.Name)
 						}
 					}
-					changed.Store(entryPath, entryType)
+					changed[entryPath] = entryType
 				}
 			case err, ok := <-watcher.Errors:
 				if !ok {
@@ -1876,14 +1870,12 @@ func (f *Fs) ChangeNotify(ctx context.Context, notifyFunc func(string, fs.EntryT
 			err := filepath.WalkDir(path, func(path string, d os.DirEntry, err error) error {
 				if err != nil {
 					fs.Errorf(f, "Error walking directory %s: %s\n", path, err)
-				}
-				if d == nil {
-					fs.Errorf(f, "No file info for %s\n", path)
+					return err
 				} else {
 					entryPath, _ := filepath.Rel(f.root, path)
 					entryType := fs.EntryObject
-					if d.IsDir() {
-						dirs.Store(path, struct{}{})
+					if d != nil && d.IsDir() {
+						dirs[path] = struct{}{}
 						entryType = fs.EntryDirectory
 						if !recurse {
 							// Watch the directory.
@@ -1930,7 +1922,7 @@ func (f *Fs) ChangeNotify(ctx context.Context, notifyFunc func(string, fs.EntryT
 						}
 					}
 					if !first {
-						changed.Store(entryPath, entryType)
+						changed[entryPath] = entryType
 					}
 				}
 				return nil
