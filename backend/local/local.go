@@ -1865,7 +1865,7 @@ func (f *Fs) ChangeNotify(ctx context.Context, notifyFunc func(string, fs.EntryT
 				// once, for the root directory.
 				err := watcher.Add(filepath.Join(path, "..."))
 				if err != nil {
-					fs.Fatalf(f, "Failed to start watching %s: %s\n", path, err)
+					fs.Errorf(f, "Failed to start watching %s: %s\n", path, err)
 				}
 				fs.Debugf(f, "Started watching %s\n", path)
 			}
@@ -1936,7 +1936,7 @@ func (f *Fs) ChangeNotify(ctx context.Context, notifyFunc func(string, fs.EntryT
 				return nil
 			})
 			if err != nil {
-				fs.Fatalf(f, "Failed to start watching %s: %s", path, err)
+				fs.Errorf(f, "Failed to start watching %s: %s", path, err)
 			}
 			first = false
 			replyChan <- true
