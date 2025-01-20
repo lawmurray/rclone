@@ -58,12 +58,12 @@ func (f *Fs) ChangeNotify(ctx context.Context, notifyFunc func(string, fs.EntryT
 			// and removed since the last tick, which will not change the diff
 			// at the next tick.
 			fs.Errorf(f, "Failed to walk %s, already removed? %s", path, err)
-			return nil
+		} else {
+			if d.IsDir() {
+				entryType = fs.EntryDirectory
+			}
+			known[entryPath] = entryType
 		}
-		if d.IsDir() {
-			entryType = fs.EntryDirectory
-		}
-		known[entryPath] = entryType
 		return nil
 	})
 	if err != nil {
@@ -141,11 +141,12 @@ func (f *Fs) ChangeNotify(ctx context.Context, notifyFunc func(string, fs.EntryT
 						// Entry has already been deleted, so cannot determine whether it
 						// was a file or directory. It is ignored, as it does not affect
 						// the diff at the next tick.
+					} else if info.IsDir() {
+						entryType = fs.EntryDirectory
+						known[entryPath] = entryType
+						changed[entryPath] = entryType
+						// TODO: Recursively add to 'known' and possibly 'changed'
 					} else {
-						if info.IsDir() {
-							entryType = fs.EntryDirectory
-							//TODO: Recursively add to known
-						}
 						known[entryPath] = entryType
 						changed[entryPath] = entryType
 					}
@@ -161,6 +162,8 @@ func (f *Fs) ChangeNotify(ctx context.Context, notifyFunc func(string, fs.EntryT
 						changed[entryPath] = entryType
 						if event.Has(fsnotify.Remove) || event.Has(fsnotify.Rename) {
 							delete(known, entryPath)
+							// TODO: Recursively remove from 'known' and
+							// possibly add to 'changed'.
 						}
 					}
 
