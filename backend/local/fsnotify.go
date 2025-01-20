@@ -1,9 +1,9 @@
 package local
 
 import (
-	_ "unsafe"
+	_ "unsafe" // use go:linkname
 
-	_ "github.com/fsnotify/fsnotify"
+	_ "github.com/fsnotify/fsnotify" // access fsnotify.enableRecurse
 )
 
 // Hack to enable recursive watchers in fsnotify, which are available for
