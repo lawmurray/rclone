@@ -1727,7 +1727,7 @@ func (f *Fs) ChangeNotify(ctx context.Context, notifyFunc func(string, fs.EntryT
 	// goroutine, which can cause deadlock (only observed on Windows, may
 	// relate to fsnotify Windows backend). A small buffer seems sufficient
 	// for tests, but it may as well be generous.
-	watchChan := make(chan string, 1024)
+	watchChan := make(chan string)
 
 	// Channel to indicate when initial watchers are established on root
 	// directory. Buffered to not unnecessarily block the watcher goroutine.
@@ -1818,7 +1818,6 @@ func (f *Fs) ChangeNotify(ctx context.Context, notifyFunc func(string, fs.EntryT
 						if _, ok := dirs.LoadAndDelete(event.Name); ok {
 							entryType = fs.EntryDirectory
 						}
-						watcher.Remove(event.Name)
 					} else if event.Has(fsnotify.Write) || event.Has(fsnotify.Chmod) {
 						if _, ok := dirs.Load(event.Name); ok {
 							entryType = fs.EntryDirectory
