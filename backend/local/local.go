@@ -1849,8 +1849,11 @@ func (f *Fs) ChangeNotify(ctx context.Context, notifyFunc func(string, fs.EntryT
 
 	// Start goroutine to establish watchers and update dirs
 	go func() {
-		recurse := runtime.GOOS == "windows" // use fsnotify recursive watcher?
 		first := true                        // is this the first path handled (the root)?
+		recurse := runtime.GOOS == "windows" // use fsnotify recursive watcher?
+		if recurse {
+			enableRecurse = true
+		}
 		for {
 			path, ok := <-watchChan
 			if !ok {
