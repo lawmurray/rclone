@@ -38,7 +38,7 @@ func (f *Fs) ChangeNotify(ctx context.Context, notifyFunc func(string, fs.EntryT
 	// Recursive watch of base directory. This is indicated by appending \...
 	// or /... to the path.
 	enableRecurse = true
-	watcher.Add(filepath.Join(f.root, "..."))
+	err = watcher.Add(filepath.Join(f.root, "..."))
 	if err != nil {
 		fs.Errorf(f, "Failed to start watching %s: %s", f.root, err)
 	} else {
