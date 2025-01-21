@@ -11,6 +11,7 @@ import (
 
 	"github.com/fsnotify/fsnotify"
 	"github.com/rclone/rclone/fs"
+	"github.com/rclone/rclone/fs/walk"
 )
 
 // Hack to enable recursive watchers in fsnotify, which are available for
@@ -53,25 +54,27 @@ func (f *Fs) ChangeNotify(ctx context.Context, notifyFunc func(string, fs.EntryT
 	changed := make(map[string]fs.EntryType)
 
 	// Walk the root directory to populate 'known'
-	err = filepath.WalkDir(f.root, func(path string, d os.DirEntry, err error) error {
-		entryPath, _ := filepath.Rel(f.root, path)
-		entryType := fs.EntryObject
-		if err != nil || d == nil {
-			// The entry has already been removed, and we do not know what type
-			// it was. It can be ignored, as this means it has been both created
-			// and removed since the last tick, which will not change the diff
-			// at the next tick.
-			fs.Errorf(f, "Failed to walk %s, already removed? %s", path, err)
+	known[""] = fs.EntryDirectory
+	err = walk.Walk(ctx, f, "", false, -1, func(entryPath string, entries fs.DirEntries, err error) error {
+		if err != nil {
+			fs.Errorf(f, "Failed to walk %s, already removed? %s", entryPath, err)
 		} else {
-			if d.IsDir() {
-				entryType = fs.EntryDirectory
+			entryType := fs.EntryObject
+			path := filepath.Join(f.root, entryPath)
+			info, err := os.Lstat(path)
+			if err != nil {
+				fs.Errorf(f, "Failed to stat %s, already removed? %s", path, err)
+			} else {
+				if info.IsDir() {
+					entryType = fs.EntryDirectory
+				}
+				known[entryPath] = entryType
 			}
-			known[entryPath] = entryType
 		}
 		return nil
 	})
 	if err != nil {
-		fs.Errorf(f, "Failed to walk %s, already removed? %s", f.root, err)
+		fs.Errorf(f, "Failed to walk root, already removed? %s", err)
 	}
 
 	// Start goroutine to handle filesystem events
