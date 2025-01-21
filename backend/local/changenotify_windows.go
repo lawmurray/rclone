@@ -152,7 +152,34 @@ func (f *Fs) ChangeNotify(ctx context.Context, notifyFunc func(string, fs.EntryT
 						entryType = fs.EntryDirectory
 						known[entryPath] = entryType
 						changed[entryPath] = entryType
-						// TODO: Recursively add to 'known' and possibly 'changed'
+
+						// TODO: Recursively add to 'known' and 'changed'
+						//
+						// The issue here is that the walk triggers errors, "The
+						// process cannot access the file because it is being
+						// used by another process."
+						//
+						// err = walk.Walk(ctx, f, entryPath, false, -1, func(entryPath string, entries fs.DirEntries, err error) error {
+						// 	if err != nil {
+						// 		fs.Errorf(f, "Failed to walk %s, already removed? %s", entryPath, err)
+						// 	} else {
+						// 		entryType := fs.EntryObject
+						// 		path := filepath.Join(f.root, entryPath)
+						// 		info, err := os.Lstat(path)
+						// 		if err != nil {
+						// 			fs.Errorf(f, "Failed to stat %s, already removed? %s", path, err)
+						// 		} else {
+						// 			if info.IsDir() {
+						// 				entryType = fs.EntryDirectory
+						// 			}
+						// 			known[entryPath] = entryType
+						// 		}
+						// 	}
+						// 	return nil
+						// })
+						// if err != nil {
+						// 	fs.Errorf(f, "Failed to walk %s, already removed? %s", entryPath, err)
+						// }
 					} else {
 						known[entryPath] = entryType
 						changed[entryPath] = entryType
@@ -170,7 +197,7 @@ func (f *Fs) ChangeNotify(ctx context.Context, notifyFunc func(string, fs.EntryT
 						if event.Has(fsnotify.Remove) || event.Has(fsnotify.Rename) {
 							delete(known, entryPath)
 							// TODO: Recursively remove from 'known' and
-							// possibly add to 'changed'.
+							// add to 'changed'.
 						}
 					}
 
