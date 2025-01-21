@@ -11,6 +11,7 @@ import (
 	"github.com/fsnotify/fsnotify"
 	"github.com/moby/sys/mountinfo"
 	"github.com/rclone/rclone/fs"
+	"github.com/rclone/rclone/fs/walk"
 )
 
 // ChangeNotify calls the passed function with a path that has had changes.
@@ -108,7 +109,7 @@ func (f *Fs) ChangeNotify(ctx context.Context, notifyFunc func(string, fs.EntryT
 				if event.Has(fsnotify.Create) {
 					fs.Debugf(f, "Create: %s", event.Name)
 					watchChan <- event.Name
-					<-replyChan
+					<-replyChan // implies mutex on 'known' and 'changed'
 				} else {
 					// Determine the entry type (file or directory) using 'known'. This
 					// is instead of Stat(), say, which is both expensive (a system
@@ -152,67 +153,116 @@ func (f *Fs) ChangeNotify(ctx context.Context, notifyFunc func(string, fs.EntryT
 		}
 	}()
 
-	// Start goroutine to establish watchers and update dirs
+	// Start goroutine to establish watchers and update 'known'
 	go func() {
-		first := true // is this the initial watch (i.e. for the root)?
 		for {
 			path, ok := <-watchChan
 			if !ok {
 				break
 			}
 
-			// Walk the directory, record files and directories to 'known', and
-			// watch all subdirectories.
-			err := filepath.WalkDir(path, func(path string, d os.DirEntry, err error) error {
-				if err != nil || d == nil {
-					// The entry has already been removed, and we do not know what type
-					// it was. It can be ignored, as this means it has been both created
-					// and removed since the last tick, which will not change the diff
-					// at the next tick.
-					fs.Errorf(f, "Failed to walk %s, already removed? %s", path, err)
-					return nil
-				}
+			// Is this the initial watch?
+			initial := path == f.root
 
-				entryPath, _ := filepath.Rel(f.root, path)
-				entryType := fs.EntryObject
-				if d.IsDir() {
-					entryType = fs.EntryDirectory
-
-					// Watch the directory.
-					//
-					// Establishing a watch on a directory before listing its
-					// contents ensures that no entries are missed and all
-					// changes are notified, even for entries created or
-					// modified while the watch is being established.
-					//
-					// An entry may be created between establishing the watch on
-					// the directory and listing the directory. In this case it
-					// is marked as changed both by this walk and the subsequent
-					// handling of the associated filesystem event. Because
-					// changes are accumulated up to the next tick, however,
-					// only a single notification is sent at the next tick.
-					//
-					// If an entry exists when the walk begins, but is removed
-					// before the walk reaches it, it is as though that entry
-					// never existed. But as both occur since the last tick,
-					// this does not affect the diff at the next tick.
-					err := watcher.Add(path)
-					if err != nil {
-						fs.Errorf(f, "Failed to start watching %s, already removed? %s", path, err)
-					} else {
-						fs.Debugf(f, "Started watching %s", path)
-					}
+			// Determine entry path
+			entryPath := ""
+			if !initial {
+				entryPath, err = filepath.Rel(f.root, path)
+				if err != nil {
+					// Not in this remote
+					replyChan <- true
+					continue
 				}
-				known[entryPath] = entryType
-				if !first {
-					changed[entryPath] = entryType
-				}
-				return nil
-			})
-			if err != nil {
-				fs.Errorf(f, "Failed to walk %s, already removed? %s", path, err)
 			}
-			first = false
+
+			// Determine entry type
+			entryType := fs.EntryObject
+			if initial {
+				// Known to be a directory, but also cannot Lstat() some mounts
+				entryType = fs.EntryDirectory
+			} else {
+				info, err := os.Lstat(path)
+				if err != nil {
+					fs.Errorf(f, "Failed to stat %s, already removed? %s", path, err)
+					replyChan <- true
+					continue
+				} else if info.IsDir() {
+					entryType = fs.EntryDirectory
+				}
+			}
+
+			// Record known and possibly changed
+			known[entryPath] = entryType
+			if !initial {
+				changed[entryPath] = entryType
+			}
+
+			if entryType == fs.EntryDirectory {
+				// Recursively watch the directory and populate 'known'
+				err := watcher.Add(path)
+				if err != nil {
+					fs.Errorf(f, "Failed to start watching %s, already removed? %s", path, err)
+				} else {
+					fs.Logf(f, "Started watching %s", path)
+				}
+				err = walk.Walk(ctx, f, entryPath, false, -1, func(entryPath string, entries fs.DirEntries, err error) error {
+					if err != nil {
+						// The entry has already been removed, and we do not know what
+						// type it was. It can be ignored, as this means it has been both
+						// created and removed since the last tick, which will not change
+						// the diff at the next tick.
+						fs.Errorf(f, "Failed to walk %s, already removed? %s", path, err)
+					}
+					for _, d := range entries {
+						entryPath := d.Remote()
+						entryType := fs.EntryObject
+						path := filepath.Join(f.root, entryPath)
+						info, err := os.Lstat(path)
+						if err != nil {
+							fs.Errorf(f, "Failed to stat %s, already removed? %s", path, err)
+							continue
+						}
+						if info.IsDir() {
+							entryType = fs.EntryDirectory
+						}
+
+						known[entryPath] = entryType
+						if !initial {
+							changed[entryPath] = entryType
+						}
+						if info.IsDir() {
+							// Watch the directory.
+							//
+							// Establishing a watch on a directory before listing its
+							// contents ensures that no entries are missed and all changes
+							// are notified, even for entries created or modified while
+							// the watch is being established.
+							//
+							// An entry may be created between establishing the watch on
+							// the directory and listing the directory. In this case it is
+							// marked as changed both by this walk and the subsequent
+							// handling of the associated filesystem event. Because
+							// changes are accumulated up to the next tick, however, only
+							// a single notification is sent at the next tick.
+							//
+							// If an entry exists when the walk begins, but is removed
+							// before the walk reaches it, it is as though that entry
+							// never existed. But as both occur since the last tick, this
+							// does not affect the diff at the next tick.
+							err := watcher.Add(path)
+							if err != nil {
+								fs.Errorf(f, "Failed to start watching %s, already removed? %s", entryPath, err)
+							} else {
+								fs.Logf(f, "Started watching %s", entryPath)
+							}
+						}
+					}
+					return nil
+				})
+				if err != nil {
+					fs.Errorf(f, "Failed to walk %s, already removed? %s", entryPath, err)
+				}
+			}
 			replyChan <- true
 		}
 	}()
